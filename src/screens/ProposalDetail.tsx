@@ -185,10 +185,22 @@ export const ProposalDetail = ({ onBack, requestId }: ProposalDetailProps) => {
     const text = commentText.trim();
     if (!text) return;
     setProcessingAction('comment');
+    const currentUser = odoo.getCurrentUser();
+    const tempComment = {
+      id: Date.now(),
+      author: currentUser?.name || 'Bạn',
+      body: text,
+      date: new Date().toISOString(),
+      attachment_ids: [],
+      parent_id: null,
+      subtype: 'Comment',
+      kind: 'comment' as const,
+    };
+    setDetail((prev) => prev ? { ...prev, comments: [tempComment, ...prev.comments] } : prev);
     try {
       await odoo.commentApprovalRequest(numericId, text);
       setCommentText('');
-      await loadDetail();
+      await refreshComments();
       setActiveTab('comments');
     } catch (e: any) {
       alert(e?.message || 'Gửi bình luận thất bại');
@@ -205,16 +217,64 @@ export const ProposalDetail = ({ onBack, requestId }: ProposalDetailProps) => {
     : status === 'rejected'
       ? 'bg-red-50 text-red-600'
       : 'bg-amber-50 text-amber-600';
-  const canAct = status === 'pending';
+  const userStatus = odoo.mapApprovalStatus(detail?.user_status || detail?.request_status || '');
+  const canAct = userStatus === 'pending';
 
-  const commentGroups = useMemo(() => {
-    if (!detail) return { comments: [], notes: [], system: [] };
-    return {
-      comments: detail.comments.filter((item) => item.kind === 'comment'),
-      notes: detail.comments.filter((item) => item.kind === 'note'),
-      system: detail.comments.filter((item) => item.kind === 'system'),
-    };
+  const refreshComments = async () => {
+    if (!numericId) return;
+    const comments = await odoo.getApprovalRequestComments(numericId);
+    setDetail((prev) => prev ? { ...prev, comments } : prev);
+  };
+
+  type CommentNode = ApprovalRequestDetail['comments'][number] & { children: CommentNode[] };
+
+  const commentThreads = useMemo(() => {
+    if (!detail) return [] as CommentNode[];
+    const items = detail.comments.filter((item) => item.kind === 'comment');
+    const byId = new Map<number, CommentNode>();
+    items.forEach((item) => byId.set(item.id, { ...item, children: [] }));
+    const roots: CommentNode[] = [];
+    byId.forEach((item) => {
+      const parentId = item.parent_id || 0;
+      if (parentId && byId.has(parentId)) {
+        byId.get(parentId)!.children.push(item);
+      } else {
+        roots.push(item);
+      }
+    });
+    return roots;
   }, [detail]);
+
+  const renderCommentNode = (item: CommentNode, depth = 0) => (
+    <div key={item.id} className="space-y-2">
+      <div className={`p-3 rounded-lg border ${depth > 0 ? 'bg-slate-50 border-slate-100' : 'bg-white border-slate-200'}`} style={{ marginLeft: depth * 16 }}>
+        <div className="flex items-center justify-between gap-2 mb-1">
+          <div className="flex items-center gap-2">
+            <span className="size-6 rounded-full bg-brand-blue/10 text-brand-blue flex items-center justify-center">
+              <MessageSquare size={12} />
+            </span>
+            <p className="text-xs font-bold text-slate-800">{item.author}</p>
+          </div>
+          <p className="text-[10px] text-slate-400">{formatDate(item.date)}</p>
+        </div>
+        <div className="text-xs text-slate-700 break-words" dangerouslySetInnerHTML={{ __html: item.body || '' }} />
+      </div>
+      {item.children.length > 0 && (
+        <div className="space-y-2">
+          {item.children.map((child) => renderCommentNode(child, depth + 1))}
+        </div>
+      )}
+    </div>
+  );
+
+  useEffect(() => {
+    if (!numericId || activeTab !== 'comments') return;
+    refreshComments();
+    const interval = setInterval(() => {
+      refreshComments();
+    }, 10000);
+    return () => clearInterval(interval);
+  }, [numericId, activeTab]);
 
   const renderAttachmentPreview = () => {
     if (!selectedAttachment) return null;
@@ -285,7 +345,7 @@ export const ProposalDetail = ({ onBack, requestId }: ProposalDetailProps) => {
         <div className="flex gap-2 overflow-x-auto no-scrollbar">
           {[
             { key: 'general', label: 'Nội dung chung' },
-            { key: 'comments', label: `Bình luận/Ghi chú (${detail?.comments.length || 0})` },
+            { key: 'comments', label: `Bình luận (${detail?.comments.length || 0})` },
             { key: 'attachments', label: `File đính kèm (${detail?.attachments.length || 0})` },
             { key: 'workflow', label: `Quy trình duyệt (${detail?.approvers.length || 0})` },
           ].map((tab) => (
@@ -473,68 +533,12 @@ export const ProposalDetail = ({ onBack, requestId }: ProposalDetailProps) => {
 
             {activeTab === 'comments' && (
               <section className="bg-white p-5 rounded-lg border border-slate-100 shadow-sm space-y-4">
-                {detail.comments.length === 0 ? (
-                  <p className="text-xs text-slate-400">Chưa có bình luận/ghi chú.</p>
+                {commentThreads.length === 0 ? (
+                  <p className="text-xs text-slate-400">Chưa có bình luận.</p>
                 ) : (
-                  <>
-                    {commentGroups.comments.length > 0 && (
-                      <div className="space-y-2">
-                        <h4 className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Bình luận</h4>
-                        {commentGroups.comments.map((item) => (
-                          <div key={item.id} className="p-3 bg-slate-50 rounded-lg border border-slate-100">
-                            <div className="flex items-center justify-between gap-2 mb-1">
-                              <div className="flex items-center gap-2">
-                                <span className="size-6 rounded-full bg-brand-blue/10 text-brand-blue flex items-center justify-center">
-                                  <MessageSquare size={12} />
-                                </span>
-                                <p className="text-xs font-bold text-slate-800">{item.author}</p>
-                              </div>
-                              <p className="text-[10px] text-slate-400">{formatDate(item.date)}</p>
-                            </div>
-                            <div className="text-xs text-slate-700 break-words" dangerouslySetInnerHTML={{ __html: item.body || '' }} />
-                          </div>
-                        ))}
-                      </div>
-                    )}
-
-                    {commentGroups.notes.length > 0 && (
-                      <div className="space-y-2">
-                        <h4 className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Ghi chú</h4>
-                        {commentGroups.notes.map((item) => (
-                          <div key={item.id} className="p-3 bg-amber-50 rounded-lg border border-amber-100">
-                            <div className="flex items-center justify-between gap-2 mb-1">
-                              <div className="flex items-center gap-2">
-                                <span className="size-6 rounded-full bg-amber-100 text-amber-700 flex items-center justify-center">
-                                  <FileText size={12} />
-                                </span>
-                                <p className="text-xs font-bold text-slate-800">{item.author}</p>
-                              </div>
-                              <p className="text-[10px] text-slate-400">{formatDate(item.date)}</p>
-                            </div>
-                            <div className="text-xs text-slate-700 break-words" dangerouslySetInnerHTML={{ __html: item.body || '' }} />
-                          </div>
-                        ))}
-                      </div>
-                    )}
-
-                    {commentGroups.system.length > 0 && (
-                      <div className="space-y-2">
-                        <h4 className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Thông báo</h4>
-                        {commentGroups.system.map((item) => (
-                          <div key={item.id} className="p-3 bg-slate-50 rounded-lg border border-slate-100">
-                            <div className="flex items-center justify-between gap-2 mb-1">
-                              <div className="flex items-center gap-2">
-                                <span className="text-[9px] font-bold text-slate-600 bg-slate-200 px-2 py-0.5 rounded-full">Thông báo</span>
-                                <p className="text-xs font-bold text-slate-800">{item.author}</p>
-                              </div>
-                              <p className="text-[10px] text-slate-400">{formatDate(item.date)}</p>
-                            </div>
-                            <div className="text-xs text-slate-700 break-words" dangerouslySetInnerHTML={{ __html: item.body || '' }} />
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </>
+                  <div className="space-y-3">
+                    {commentThreads.map((item) => renderCommentNode(item))}
+                  </div>
                 )}
 
                 <div className="sticky bottom-0 bg-white pt-3 border-t border-slate-100 space-y-2">
@@ -697,31 +701,41 @@ export const ProposalDetail = ({ onBack, requestId }: ProposalDetailProps) => {
         )}
       </div>
 
-      {canAct && (
+      {status !== 'other' && (
         <div className="border-t border-slate-200 bg-white px-4 py-3">
-          <div className="grid grid-cols-3 gap-2">
-            <button
-              onClick={onApprove}
-              disabled={processingAction !== null}
-              className="py-2.5 rounded-lg bg-emerald-50 text-emerald-600 text-xs font-bold disabled:opacity-50"
-            >
-              {processingAction === 'approve' ? 'Đang duyệt...' : 'Duyệt'}
-            </button>
-            <button
-              onClick={onReject}
-              disabled={processingAction !== null}
-              className="py-2.5 rounded-lg bg-red-50 text-red-600 text-xs font-bold disabled:opacity-50"
-            >
-              {processingAction === 'reject' ? 'Đang xử lý...' : 'Từ chối'}
-            </button>
+          {canAct ? (
+            <div className="grid grid-cols-3 gap-2">
+              <button
+                onClick={onApprove}
+                disabled={processingAction !== null}
+                className="py-2.5 rounded-lg bg-emerald-50 text-emerald-600 text-xs font-bold disabled:opacity-50"
+              >
+                {processingAction === 'approve' ? 'Đang duyệt...' : 'Duyệt'}
+              </button>
+              <button
+                onClick={onReject}
+                disabled={processingAction !== null}
+                className="py-2.5 rounded-lg bg-red-50 text-red-600 text-xs font-bold disabled:opacity-50"
+              >
+                {processingAction === 'reject' ? 'Đang xử lý...' : 'Từ chối'}
+              </button>
+              <button
+                onClick={() => setActiveTab('comments')}
+                disabled={processingAction !== null}
+                className="py-2.5 rounded-lg bg-slate-100 text-slate-600 text-xs font-bold disabled:opacity-50"
+              >
+                Bình luận
+              </button>
+            </div>
+          ) : (
             <button
               onClick={() => setActiveTab('comments')}
               disabled={processingAction !== null}
-              className="py-2.5 rounded-lg bg-slate-100 text-slate-600 text-xs font-bold disabled:opacity-50"
+              className="w-full py-2.5 rounded-lg bg-slate-100 text-slate-600 text-xs font-bold disabled:opacity-50"
             >
               Bình luận
             </button>
-          </div>
+          )}
         </div>
       )}
     </motion.div>

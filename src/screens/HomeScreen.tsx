@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import { 
   Plus, 
   CheckCircle2, 
@@ -18,26 +18,228 @@ import {
   Plane,
   MoreHorizontal,
   ThumbsUp,
-  MessageSquare
+  MessageSquare,
+  Cloud,
+  CloudRain,
+  Sun,
+  CloudSnow,
+  MoonStar
 } from 'lucide-react';
 import { motion } from 'motion/react';
+import { odoo } from '../services/odooService';
+
+interface WeatherData {
+  temperature: number;
+  description: string;
+  icon: string;
+  advice: string;
+  weatherCode: number;
+}
+
+interface NewsItem {
+  id: string;
+  title: string;
+  excerpt: string;
+  link: string;
+  date: string;
+  image?: string;
+}
+
+const normalizeUrl = (value?: string | null): string => {
+  if (!value) return '';
+  if (value.startsWith('//')) return `https:${value}`;
+  if (value.startsWith('/')) return `https://tanadaithanh.vn${value}`;
+  return value;
+};
+
+const parseNewsFromHtml = (html: string): NewsItem[] => {
+  try {
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(html, 'text/html');
+    const articles = Array.from(doc.querySelectorAll('article'));
+
+    const items = articles
+      .map((article, index): NewsItem | null => {
+        const linkEl = article.querySelector('a[href]') as HTMLAnchorElement | null;
+        const titleEl = article.querySelector('h2, h3, .post-title, .entry-title');
+        const excerptEl = article.querySelector('.post-excerpt, .entry-summary, p');
+        const dateEl = article.querySelector('time, .post-date, .entry-date');
+        const imageEl = article.querySelector('img') as HTMLImageElement | null;
+
+        const title = (titleEl?.textContent || '').trim();
+        const link = normalizeUrl(linkEl?.getAttribute('href') || '');
+        if (!title || !link) return null;
+
+        const excerpt = (excerptEl?.textContent || '').trim();
+        const date = (dateEl?.textContent || '').trim();
+        const image = normalizeUrl(imageEl?.getAttribute('src'));
+
+        return {
+          id: `html_news_${index}`,
+          title,
+          excerpt: excerpt || 'Xem chi tiết bài viết tại trang Tin tức Tân Á Đại Thành.',
+          link,
+          date,
+          image: image || undefined,
+        };
+      })
+      .filter((item): item is NewsItem => Boolean(item));
+
+    return items.slice(0, 8);
+  } catch (error) {
+    console.warn('Không parse được HTML tin tức:', error);
+    return [];
+  }
+};
+
+const getCacheValue = <T,>(key: string, maxAgeMs: number): T | null => {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { value: T; savedAt: number };
+    if (!parsed?.savedAt || Date.now() - parsed.savedAt > maxAgeMs) return null;
+    return parsed.value;
+  } catch {
+    return null;
+  }
+};
+
+const setCacheValue = <T,>(key: string, value: T) => {
+  try {
+    localStorage.setItem(key, JSON.stringify({ value, savedAt: Date.now() }));
+  } catch {
+    return;
+  }
+};
+
+const getWeatherIcon = (code: number) => {
+  if ([0, 1].includes(code)) return Sun;
+  if ([2, 3].includes(code)) return Cloud;
+  if ([45, 48].includes(code)) return Cloud;
+  if ([51, 53, 55, 61, 63, 65, 80, 81, 82].includes(code)) return CloudRain;
+  if ([71, 73, 75, 77, 85, 86].includes(code)) return CloudSnow;
+  return Cloud;
+};
+
+const getWeatherAdvice = (code: number, temp: number) => {
+  if ([0, 1].includes(code)) return 'Thời tiết đẹp, hãy tận dụng để làm việc hiệu quả!';
+  if ([2, 3].includes(code)) return 'Trời hơi âm u, hãy tập trung vào công việc.';
+  if ([45, 48].includes(code)) return 'Có sương mù, cần cẩn thận khi đi lại.';
+  if ([51, 53, 55, 61, 63, 65, 80, 81, 82].includes(code)) return 'Trời mưa, hãy chuẩn bị ô khi ra ngoài.';
+  if ([71, 73, 75, 77, 85, 86].includes(code)) return 'Có tuyết, hãy mặc ấm và cẩn thận.';
+  if (temp > 35) return 'Trời nóng, nhớ uống đủ nước!';
+  if (temp < 5) return 'Trời lạnh, hãy mặc ấm!';
+  return 'Một ngày bình thường, hãy làm việc thật tốt!';
+};
+
+const fetchWeather = async (): Promise<WeatherData | null> => {
+  try {
+    const cached = getCacheValue<WeatherData>('home_weather_cache', 30 * 60 * 1000);
+    if (cached) return cached;
+
+    const response = await fetch(
+      'https://api.open-meteo.com/v1/forecast?latitude=21.0285&longitude=105.8542&current=temperature_2m,weather_code&timezone=auto'
+    );
+    const data = await response.json();
+    const current = data.current;
+    const code = current.weather_code;
+    const temp = current.temperature_2m;
+    
+    const weatherValue = {
+      temperature: Math.round(temp),
+      description: `${temp}°C`,
+      icon: 'weather',
+      advice: getWeatherAdvice(code, temp),
+      weatherCode: code,
+    };
+
+    setCacheValue('home_weather_cache', weatherValue);
+    return weatherValue;
+  } catch (error) {
+    console.error('Failed to fetch weather:', error);
+    return null;
+  }
+};
+
+const getTimeBasedGreeting = () => {
+  const hour = new Date().getHours();
+  if (hour < 12) return 'Chào buổi sáng';
+  if (hour < 18) return 'Chào buổi chiều';
+  return 'Chào buổi tối';
+};
 
 export const HomeScreen = ({ 
   userRole,
+  pendingApprovalCount = 0,
   onShowDashboard,
   onShowProposal,
   onShowApproval,
-  onShowSignature
+  onShowSignature,
+  onShowNewsDetail
 }: { 
   userRole: string | null,
+  pendingApprovalCount?: number,
   onShowDashboard: () => void, 
   onShowProposal: () => void,
   onShowApproval: () => void,
   onShowSignature: () => void,
+  onShowNewsDetail?: (news: NewsItem) => void,
   key?: string 
 }) => {
+  const [weather, setWeather] = useState<WeatherData | null>(null);
+  const [news, setNews] = useState<NewsItem[]>([]);
+  const [loadingNews, setLoadingNews] = useState(true);
+  const user = odoo.getCurrentUser();
+  const userName = user?.name || userRole || 'Thành viên';
+  
+  useEffect(() => {
+    fetchWeather().then(setWeather);
+    fetchNews();
+  }, []);
+  
+  const fetchNews = async () => {
+    try {
+      const cached = getCacheValue<NewsItem[]>('home_news_cache', 15 * 60 * 1000);
+      if (cached && cached.length > 0) {
+        setNews(cached);
+        setLoadingNews(false);
+        return;
+      }
+
+      setLoadingNews(true);
+      const response = await fetch('/api/news');
+      const contentType = response.headers.get('content-type') || '';
+
+      let nextNews: NewsItem[] = [];
+      if (contentType.includes('application/json')) {
+        const data = await response.json();
+        nextNews = Array.isArray(data?.news) ? data.news : [];
+      } else {
+        const html = await response.text();
+        nextNews = parseNewsFromHtml(html);
+      }
+
+      setNews(nextNews);
+      if (nextNews.length > 0) {
+        setCacheValue('home_news_cache', nextNews);
+      }
+    } catch (error) {
+      console.error('Failed to fetch news:', error);
+      setNews([]);
+    } finally {
+      setLoadingNews(false);
+    }
+  };
+  
   const isBOD = userRole === 'HĐQT' || userRole === 'Ban TGĐ & QL';
   const isHR = userRole === 'Nhân sự';
+  const greeting = getTimeBasedGreeting();
+  const currentHour = new Date().getHours();
+  const isNightTime = currentHour >= 19 || currentHour < 5;
+  const WeatherIcon = weather
+    ? (isNightTime ? MoonStar : getWeatherIcon(weather.weatherCode))
+    : Cloud;
+  const weatherAdvice = isNightTime ? 'Đêm rồi, chúc bạn ngủ ngon 🌙' : weather?.advice;
   
   return (
     <motion.div 
@@ -47,14 +249,27 @@ export const HomeScreen = ({
       className="pb-24 space-y-8"
     >
       <section className="px-4 pt-6 pb-2">
-        <h2 className="text-xl font-black text-slate-900">
-          Chào buổi sáng, {userRole || 'Thành viên'}
-        </h2>
-        <p className="text-slate-500 text-sm mt-1 font-medium">
-          {isBOD 
-            ? 'Hệ thống đã sẵn sàng với các báo cáo chiến lược mới nhất.' 
-            : 'Chúc bạn một ngày làm việc hiệu quả và năng động.'}
-        </p>
+        <div className="flex items-center justify-between gap-4">
+          <div className="flex-1">
+            <h2 className="text-base font-black text-slate-900 leading-snug break-words">
+              {greeting}, {userName}
+            </h2>
+            {/* <p className="text-slate-500 text-sm mt-1 font-medium">
+              {isBOD 
+                ? 'Hệ thống đã sẵn sàng với các báo cáo chiến lược mới nhất.' 
+                : 'Chúc bạn một ngày làm việc hiệu quả và năng động.'}
+            </p> */}
+          </div>
+          {weather && (
+            <div className="bg-gradient-to-br from-blue-50 to-cyan-50 rounded-lg p-3 min-w-[100px] border border-blue-200/50">
+              <div className="flex items-center gap-2 mb-2">
+                <WeatherIcon size={24} className="text-blue-600" />
+                <span className="text-lg font-black text-slate-900">{weather.temperature}°C</span>
+              </div>
+              <p className="text-[10px] text-blue-600 font-bold leading-tight">{weatherAdvice}</p>
+            </div>
+          )}
+        </div>
       </section>
 
       {/* Market & Strategy Quick View - Only for BOD */}
@@ -89,7 +304,7 @@ export const HomeScreen = ({
         <div className="grid grid-cols-4 gap-4">
           {[
             { label: 'Tờ trình', icon: FileText, color: 'bg-blue-50 text-blue-600', action: onShowProposal },
-            { label: 'Phê duyệt', icon: CheckCircle2, color: 'bg-emerald-50 text-emerald-600', action: onShowApproval },
+            { label: 'Phê duyệt', icon: CheckCircle2, color: 'bg-emerald-50 text-emerald-600', action: onShowApproval, badge: pendingApprovalCount },
             { label: 'Ký số', icon: PenTool, color: 'bg-purple-50 text-purple-600', action: onShowSignature },
             { label: 'Lịch họp', icon: Calendar, color: 'bg-amber-50 text-amber-600', action: () => {} },
             { label: 'Nghỉ phép', icon: UserMinus, color: 'bg-pink-50 text-pink-600', action: () => {} },
@@ -97,9 +312,14 @@ export const HomeScreen = ({
             { label: 'Thanh toán', icon: CreditCard, color: 'bg-cyan-50 text-cyan-600', action: () => {} },
             { label: 'Thêm...', icon: MoreHorizontal, color: 'bg-slate-50 text-slate-600', action: () => {} },
           ].map((item, i) => (
-            <button key={i} onClick={item.action} className="flex flex-col items-center gap-2 group">
-              <div className={`size-12 rounded-2xl ${item.color} flex items-center justify-center shadow-sm group-hover:scale-110 transition-transform`}>
+            <button key={i} onClick={item.action} className="flex flex-col items-center gap-2 group relative">
+              <div className={`size-12 rounded-2xl ${item.color} flex items-center justify-center shadow-sm group-hover:scale-110 transition-transform relative`}>
                 <item.icon size={22} />
+                {item.badge && item.badge > 0 && (
+                  <span className="absolute -top-2 -right-2 min-w-5 px-1.5 h-5 rounded-full bg-red-500 text-white text-[9px] font-bold flex items-center justify-center">
+                    {item.badge}
+                  </span>
+                )}
               </div>
               <span className="text-[10px] font-bold text-slate-600 text-center leading-tight">{item.label}</span>
             </button>
@@ -190,29 +410,45 @@ export const HomeScreen = ({
       <section className="px-4">
         <div className="flex items-center justify-between mb-4">
           <h3 className="text-xs font-black text-slate-400 uppercase tracking-[0.2em]">Tin tức & Thông cáo</h3>
-          <button className="text-slate-400 text-[10px] font-black uppercase tracking-widest flex items-center">
+          <a href="https://tanadaithanh.vn/tin-tuc/" target="_blank" rel="noreferrer" className="text-slate-400 text-[10px] font-black uppercase tracking-widest flex items-center hover:text-brand-blue transition-colors">
             Tất cả <ChevronRight size={14} />
-          </button>
+          </a>
         </div>
         <div className="space-y-3">
-          {[
-            { title: 'Tân Á Đại Thành nhận giải thưởng Top 10 Doanh nghiệp tiêu biểu', source: 'Phòng Truyền thông', time: '1 giờ trước', icon: Newspaper },
-            { title: 'Bản tin thị trường Bất động sản nghỉ dưỡng Phú Quốc Q1/2024', source: 'Ban Chiến lược', time: '3 giờ trước', icon: TrendingUp },
-          ].map((news, idx) => (
-            <div key={idx} className="bg-white p-4 rounded-lg shadow-sm border border-slate-100 flex items-center gap-4 cursor-pointer hover:bg-slate-50 transition-colors">
-              <div className="size-12 bg-slate-50 rounded-lg flex items-center justify-center text-brand-blue shrink-0">
-                <news.icon size={20} />
-              </div>
-              <div className="flex-1 min-w-0">
-                <h4 className="text-sm font-bold leading-tight truncate">{news.title}</h4>
-                <div className="flex items-center gap-2 mt-1">
-                  <span className="text-[10px] text-slate-400 font-bold uppercase">{news.source}</span>
-                  <span className="text-[10px] text-slate-300">•</span>
-                  <span className="text-[10px] text-slate-400">{news.time}</span>
+          {loadingNews ? (
+            <div className="text-xs text-slate-500 text-center py-4">Đang tải tin tức...</div>
+          ) : news.length === 0 ? (
+            <div className="text-xs text-slate-500 text-center py-4">Chưa có tin tức nào</div>
+          ) : (
+            news.slice(0, 5).map((item) => (
+              <button
+                key={item.id}
+                onClick={() => onShowNewsDetail?.(item)}
+                className="bg-white p-4 rounded-lg shadow-sm border border-slate-100 flex items-start gap-4 cursor-pointer hover:bg-slate-50 hover:border-slate-200 transition-all text-left w-full"
+              >
+                {item.image && (
+                  <div className="w-16 h-16 rounded-lg overflow-hidden bg-slate-100 shrink-0">
+                    <img
+                      src={item.image}
+                      alt={item.title}
+                      className="w-full h-full object-cover"
+                      onError={(e) => {
+                        (e.target as HTMLImageElement).style.display = 'none';
+                      }}
+                    />
+                  </div>
+                )}
+                <div className="flex-1 min-w-0">
+                  <h4 className="text-sm font-bold leading-tight line-clamp-2 text-slate-900">{item.title}</h4>
+                  <div className="flex items-center gap-2 mt-2">
+                    {item.date && (
+                      <span className="text-[10px] text-slate-400 font-bold uppercase">{item.date}</span>
+                    )}
+                  </div>
                 </div>
-              </div>
-            </div>
-          ))}
+              </button>
+            ))
+          )}
         </div>
       </section>
     </motion.div>

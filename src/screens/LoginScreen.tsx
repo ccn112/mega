@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { 
   Lock, 
   ArrowRight, 
@@ -27,13 +27,28 @@ export const LoginScreen = ({ onLogin }: { onLogin: (role?: string) => void }) =
   const [selectedCategory, setSelectedCategory] = useState<UserCategory | null>(null);
   const [isAuthenticating, setIsAuthenticating] = useState(false);
   const [biometricType, setBiometricType] = useState<'fingerprint' | 'face' | null>(null);
-  const [username, setUsername] = useState('chinh.nc01@tanadaithanh.vn');
-  const [password, setPassword] = useState('CongchInh112');
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
   const [erpUrl, setErpUrl] = useState('https://office.tanadaithanh.vn'); // Default URL
+  const [rememberLogin, setRememberLogin] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   const employeeRoles = ['HĐQT', 'Ban TGĐ & QL', 'Nhân viên'];
   const partnerRoles = ['Nhà cung cấp', 'Đại lý', 'Khách hàng'];
+
+  useEffect(() => {
+    const remembered = localStorage.getItem('remember_login') === '1';
+    const savedUsername = localStorage.getItem('saved_login_username') || '';
+    const savedPassword = localStorage.getItem('saved_login_password') || '';
+    const savedErpUrl = localStorage.getItem('saved_erp_url') || 'https://office.tanadaithanh.vn';
+
+    setRememberLogin(remembered);
+    setErpUrl(savedErpUrl);
+    if (remembered) {
+      setUsername(savedUsername);
+      setPassword(savedPassword);
+    }
+  }, []);
 
   const handleLogin = async () => {
     if (!username || !password) {
@@ -45,8 +60,20 @@ export const LoginScreen = ({ onLogin }: { onLogin: (role?: string) => void }) =
     setError(null);
     try {
       console.log('Starting login process for:', username);
-      const result = await odoo.login(username, password);
+      odoo.setBaseUrl('/api/odoo');
+      const result = await odoo.login(username, password, 'production', { persistSession: true });
       console.log('Odoo Login Success:', result);
+
+      localStorage.setItem('saved_erp_url', erpUrl.trim() || 'https://office.tanadaithanh.vn');
+      if (rememberLogin) {
+        localStorage.setItem('remember_login', '1');
+        localStorage.setItem('saved_login_username', username);
+        localStorage.setItem('saved_login_password', password);
+      } else {
+        localStorage.setItem('remember_login', '0');
+        localStorage.removeItem('saved_login_username');
+        localStorage.removeItem('saved_login_password');
+      }
       
       onLogin('Nhân viên');
     } catch (err: any) {
@@ -168,6 +195,15 @@ export const LoginScreen = ({ onLogin }: { onLogin: (role?: string) => void }) =
                       className="w-full bg-white/5 border border-white/10 rounded-xl py-3 pl-10 pr-4 text-white placeholder:text-white/30 outline-none focus:border-brand-blue/50 focus:ring-1 focus:ring-brand-blue/50 transition-all"
                     />
                   </div>
+                  <label className="flex items-center gap-2 pt-1 select-none cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={rememberLogin}
+                      onChange={(e) => setRememberLogin(e.target.checked)}
+                      className="h-4 w-4 rounded border-white/20 bg-white/10 text-brand-blue focus:ring-brand-blue/50"
+                    />
+                    <span className="text-[11px] text-white/70 font-medium">Ghi nhớ thông tin đăng nhập</span>
+                  </label>
                 </div>
 
                 <button 

@@ -47,6 +47,7 @@ import { ProfileScreen } from './screens/ProfileScreen';
 import { ApprovalListScreen } from './screens/ApprovalListScreen';
 import { TaskScreen } from './screens/TaskScreen';
 import { TaskDetail } from './screens/TaskDetail';
+import { NewsDetailScreen } from './screens/NewsDetailScreen';
 import { CheckInModal } from './components/CheckInModal';
 import { CheckOutModal } from './components/CheckOutModal';
 import { ProposalForm } from './components/ProposalForm';
@@ -63,13 +64,13 @@ type Screen = 'home' | 'digital_office' | 'my_day' | 'internal_info' | 'more';
 
 // --- Components ---
 
-const BottomNav = ({ activeScreen, setScreen }: { activeScreen: Screen, setScreen: (s: Screen) => void }) => {
+const BottomNav = ({ activeScreen, setScreen, pendingCount }: { activeScreen: Screen, setScreen: (s: Screen) => void, pendingCount: number }) => {
   const navItems: { id: Screen, label: string, icon: React.ElementType }[] = [
     { id: 'home', label: 'Home', icon: Home },
     { id: 'digital_office', label: 'Văn phòng số', icon: FileText },
     { id: 'my_day', label: 'My Day', icon: Calendar },
     { id: 'internal_info', label: 'TT nội bộ', icon: MessageSquare },
-    { id: 'more', label: 'Thêm nữa', icon: Settings },
+    { id: 'more', label: 'Mở rộng', icon: Settings },
   ];
 
   return (
@@ -87,7 +88,14 @@ const BottomNav = ({ activeScreen, setScreen }: { activeScreen: Screen, setScree
                 : 'text-slate-400 hover:bg-slate-50'
             }`}
           >
-            <item.icon size={18} fill={activeScreen === item.id ? "currentColor" : "none"} />
+            <span className="relative">
+              <item.icon size={18} fill={activeScreen === item.id ? "currentColor" : "none"} />
+              {item.id === 'digital_office' && pendingCount > 0 && (
+                <span className="absolute -top-2 -right-2 min-w-4 px-1.5 h-4 rounded-full bg-red-500 text-white text-[9px] font-bold flex items-center justify-center">
+                  {pendingCount}
+                </span>
+              )}
+            </span>
             {activeScreen === item.id && (
               <motion.span 
                 initial={{ opacity: 0, x: -5 }}
@@ -152,8 +160,8 @@ const Header = ({ title, subtitle, showAvatar = true, rightAction, onAvatarClick
 // --- Main App ---
 
 export default function App() {
-  const [isLoggedIn, setIsLoggedIn] = useState(false);
-  const [userRole, setUserRole] = useState<string | null>(null);
+  const [isLoggedIn, setIsLoggedIn] = useState(() => odoo.restoreSession());
+  const [userRole, setUserRole] = useState<string | null>(() => localStorage.getItem('odoo_user_role'));
   const [screen, setScreen] = useState<Screen>('home');
   
   // UI visibility states
@@ -187,6 +195,9 @@ export default function App() {
   const [proposalDetailId, setProposalDetailId] = useState<number | string | null>(null);
   const [showProfile, setShowProfile] = useState(false);
   const [showApprovalList, setShowApprovalList] = useState(false);
+  const [pendingApprovalCount, setPendingApprovalCount] = useState(0);
+  const [showNewsDetail, setShowNewsDetail] = useState(false);
+  const [selectedNews, setSelectedNews] = useState<any>(null);
 
   // Notification Handling Logic
   React.useEffect(() => {
@@ -226,6 +237,33 @@ export default function App() {
     window.addEventListener('app-notification-click', handleNotification);
     return () => window.removeEventListener('app-notification-click', handleNotification);
   }, []);
+
+  React.useEffect(() => {
+    if (!isLoggedIn) return;
+    const loadPendingCount = async () => {
+      try {
+        const count = await odoo.getUserPendingApprovalCount();
+        setPendingApprovalCount(count);
+      } catch (error) {
+        console.warn('Không tải được thống kê chờ duyệt:', error);
+      }
+    };
+
+    loadPendingCount();
+  }, [isLoggedIn, screen]);
+
+  React.useEffect(() => {
+    if (screen !== 'home') {
+      setShowNewsDetail(false);
+      setSelectedNews(null);
+    }
+  }, [screen]);
+
+  React.useEffect(() => {
+    if (isLoggedIn) {
+      odoo.restoreSession();
+    }
+  }, [isLoggedIn]);
 
   // Scroll handler for hiding/showing UI
   React.useEffect(() => {
@@ -268,7 +306,8 @@ export default function App() {
   };
 
   const handleBack = () => {
-    if (showProjectTimeline) setShowProjectTimeline(false);
+    if (showNewsDetail) setShowNewsDetail(false);
+    else if (showProjectTimeline) setShowProjectTimeline(false);
     else if (showProjectDocuments) setShowProjectDocuments(false);
     else if (showProjectTeam) setShowProjectTeam(false);
     else if (showProjectKanban) setShowProjectKanban(false);
@@ -292,7 +331,10 @@ export default function App() {
   if (!isLoggedIn) {
     return <LoginScreen onLogin={(role) => {
       setIsLoggedIn(true);
-      if (role) setUserRole(role);
+      if (role) {
+        setUserRole(role);
+        localStorage.setItem('odoo_user_role', role);
+      }
     }} />;
   }
 
@@ -347,6 +389,7 @@ export default function App() {
             <HomeScreen 
               key="home" 
               userRole={userRole}
+              pendingApprovalCount={pendingApprovalCount}
               onShowDashboard={() => {
                 setScreen('more');
                 setShowDashboardDetail(true);
@@ -354,6 +397,10 @@ export default function App() {
               onShowProposal={() => setShowProposalForm(true)}
               onShowApproval={() => setShowApprovalList(true)}
               onShowSignature={() => setShowDigitalSignature(true)}
+              onShowNewsDetail={(news) => {
+                setSelectedNews(news);
+                setShowNewsDetail(true);
+              }}
             />
           )}
           {screen === 'digital_office' && (
@@ -361,6 +408,7 @@ export default function App() {
               userRole={userRole}
               onShowProposal={() => setShowProposalForm(true)}
               onShowApproval={() => setShowApprovalList(true)}
+              onOpenProposalDetail={(id) => setProposalDetailId(id)}
               onCheckIn={() => setShowCheckInModal(true)}
               onCheckOut={() => setShowCheckOutModal(true)}
               onShowPayroll={() => setShowPayroll(true)}
@@ -376,10 +424,15 @@ export default function App() {
           {screen === 'internal_info' && <InternalInfoScreen />}
           {screen === 'more' && (
             <MoreScreen 
+              userRole={userRole}
               onShowAI={() => setShowAIDetail(true)}
               onShowCRM={() => setShowCRMDetail(true)}
               onShowDashboard={() => setShowDashboardDetail(true)}
-              onLogout={() => setIsLoggedIn(false)}
+              onLogout={async () => {
+                await odoo.logout();
+                localStorage.removeItem('odoo_user_role');
+                setIsLoggedIn(false);
+              }}
               onSimulateNotification={(type) => {
                 switch(type) {
                   case 'project': simulateNotificationClick({ screen: 'project_detail', id: '1' }); break;
@@ -406,7 +459,7 @@ export default function App() {
         </AnimatePresence>
       </main>
 
-      <BottomNav activeScreen={screen} setScreen={setScreen} />
+      <BottomNav activeScreen={screen} setScreen={setScreen} pendingCount={pendingApprovalCount} />
       
       {/* Detail Overlays */}
       <AnimatePresence>
@@ -453,8 +506,18 @@ export default function App() {
           />
         )}
         {proposalDetailId && <ProposalDetail requestId={proposalDetailId} onBack={() => setProposalDetailId(null)} />}
-        {showProfile && <ProfileScreen onBack={() => setShowProfile(false)} onLogout={() => setIsLoggedIn(false)} />}
+        {showProfile && <ProfileScreen onBack={() => setShowProfile(false)} onLogout={async () => {
+          await odoo.logout();
+          localStorage.removeItem('odoo_user_role');
+          setIsLoggedIn(false);
+        }} />}
         {showApprovalList && <ApprovalListScreen onBack={() => setShowApprovalList(false)} />}
+        {screen === 'home' && showNewsDetail && selectedNews && (
+          <NewsDetailScreen
+            newsItem={selectedNews}
+            onBack={() => setShowNewsDetail(false)}
+          />
+        )}
         {showProposalForm && <ProposalForm onBack={() => setShowProposalForm(false)} />}
         {showProjectForm && <ProjectForm onBack={() => setShowProjectForm(false)} />}
         {showTaskForm && <TaskForm onBack={() => setShowTaskForm(false)} />}

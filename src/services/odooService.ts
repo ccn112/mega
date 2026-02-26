@@ -19,7 +19,10 @@ export interface ApprovalRequest {
   user_status: string;
   current_approval_sequence: number;
   next_approver_ids: number[];
+  approver_ids?: number[];
   request_owner_id: [number, string];
+  category_id?: [number, string] | false;
+  company_id?: [number, string] | false;
   create_date?: string;
   date_confirmed: string;
   date_scheduled: string;
@@ -69,6 +72,7 @@ export interface ApprovalComment {
   body: string;
   date?: string;
   attachment_ids: number[];
+  parent_id?: number | null;
   subtype?: string;
   kind: 'comment' | 'note' | 'system';
 }
@@ -82,6 +86,22 @@ export interface ApprovalAttachment {
   create_uid?: [number, string] | false;
   preview_url: string;
   download_url: string;
+}
+
+export interface RecentDocument {
+  id: number;
+  name: string;
+  mimetype?: string;
+  file_size?: number;
+  create_date?: string;
+  download_url: string;
+}
+
+export interface ApprovalRequestCounts {
+  all: number;
+  pending: number;
+  approved: number;
+  rejected: number;
 }
 
 export interface ApprovalRequestDetail extends ApprovalRequest {
@@ -99,8 +119,81 @@ export interface ApprovalRequestDetail extends ApprovalRequest {
 }
 
 class OdooService {
-  private baseUrl: string = '/api/odoo';
+  private baseUrl: string = localStorage.getItem('odoo_base_url') || '/api/odoo';
   private sessionId: string | null = null;
+  private cacheStore = new Map<string, { value: unknown; expiresAt: number }>();
+
+  private getCachedValue<T>(key: string): T | null {
+    const cached = this.cacheStore.get(key);
+    if (!cached) return null;
+    if (Date.now() > cached.expiresAt) {
+      this.cacheStore.delete(key);
+      return null;
+    }
+    return cached.value as T;
+  }
+
+  private setCachedValue<T>(key: string, value: T, ttlMs: number) {
+    this.cacheStore.set(key, {
+      value,
+      expiresAt: Date.now() + ttlMs,
+    });
+  }
+
+  private clearCacheByPrefix(prefix: string) {
+    for (const key of this.cacheStore.keys()) {
+      if (key.startsWith(prefix)) {
+        this.cacheStore.delete(key);
+      }
+    }
+  }
+
+  private invalidateApprovalCache() {
+    this.clearCacheByPrefix('approval:');
+  }
+
+  private extendSession(days: number = 30) {
+    const expiresAt = Date.now() + days * 24 * 60 * 60 * 1000;
+    localStorage.setItem('odoo_session_expires_at', String(expiresAt));
+  }
+
+  setBaseUrl(url: string) {
+    const normalized = (url || '').trim().replace(/\/$/, '');
+    if (!normalized) {
+      this.baseUrl = '/api/odoo';
+      localStorage.removeItem('odoo_base_url');
+      return;
+    }
+
+    if (normalized.startsWith('http://') || normalized.startsWith('https://')) {
+      this.baseUrl = '/api/odoo';
+      localStorage.setItem('odoo_base_url', '/api/odoo');
+      return;
+    }
+
+    this.baseUrl = normalized;
+    localStorage.setItem('odoo_base_url', normalized);
+  }
+
+  hasValidSession(): boolean {
+    const sid = localStorage.getItem('odoo_session_id');
+    const user = localStorage.getItem('odoo_user');
+    const expiresAt = Number(localStorage.getItem('odoo_session_expires_at') || 0);
+
+    if (!sid || !user) return false;
+    if (!expiresAt || Date.now() > expiresAt) {
+      this.logout();
+      return false;
+    }
+    return true;
+  }
+
+  restoreSession(): boolean {
+    if (!this.hasValidSession()) return false;
+    this.sessionId = localStorage.getItem('odoo_session_id');
+    this.extendSession(30);
+    return true;
+  }
 
   private async executeFirstSuccessfulCall(candidates: Array<{ model: string; method: string; args?: any[]; kwargs?: Record<string, any> }>) {
     let lastError: unknown = null;
@@ -162,11 +255,12 @@ class OdooService {
     const sid = this.sessionId || localStorage.getItem('odoo_session_id');
     if (sid) {
       headers['X-Odoo-Session-Id'] = sid;
+      this.extendSession(30);
     }
     return headers;
   }
 
-  async login(login: string, password: string, db: string = 'production'): Promise<any> {
+  async login(login: string, password: string, db: string = 'production', options?: { persistSession?: boolean }): Promise<any> {
     const url = `${this.baseUrl}/web/session/authenticate`;
     console.log('Attempting Odoo login to:', url);
     try {
@@ -203,11 +297,12 @@ class OdooService {
       }
 
       if (data.result) {
-        // Odoo returns session_id in cookies, but we might need to store it if we can't rely on cookies in iframe
-        // Note: The proxy handles injecting the session_id cookie if we send it in headers
         this.sessionId = data.result.session_id;
         localStorage.setItem('odoo_session_id', data.result.session_id || '');
         localStorage.setItem('odoo_user', JSON.stringify(data.result));
+        if (options?.persistSession !== false) {
+          this.extendSession(30);
+        }
       }
 
       return data.result;
@@ -218,6 +313,10 @@ class OdooService {
   }
 
   async getApprovalRequests(limit: number = 500, offset: number = 0): Promise<ApprovalRequest[]> {
+    const cacheKey = `approval:requests:${limit}:${offset}`;
+    const cached = this.getCachedValue<ApprovalRequest[]>(cacheKey);
+    if (cached) return cached;
+
     try {
       const result = await this.callKw<ApprovalRequest[]>({
         jsonrpc: "2.0",
@@ -236,7 +335,10 @@ class OdooService {
               "user_status",
               "current_approval_sequence",
               "next_approver_ids",
+              "approver_ids",
               "request_owner_id",
+              "category_id",
+              "company_id",
               "create_date",
               "date_confirmed",
               "date_scheduled",
@@ -255,7 +357,9 @@ class OdooService {
         }
       });
 
-      return result || [];
+      const output = result || [];
+      this.setCachedValue(cacheKey, output, 45 * 1000);
+      return output;
     } catch (error) {
       console.error('Odoo Fetch Error:', error);
       throw error;
@@ -299,18 +403,20 @@ class OdooService {
       { model: 'approval.request', method: 'approve', args: [[requestId]] },
       { model: 'approval.request', method: 'action_approve', args: [requestId] },
     ]);
+    this.invalidateApprovalCache();
   }
 
   async rejectApprovalRequest(requestId: number, reason?: string): Promise<void> {
     await this.executeFirstSuccessfulCall([
       { model: 'approval.request', method: 'action_refuse', args: [[requestId]], kwargs: reason ? { reason } : {} },
       { model: 'approval.request', method: 'action_reject', args: [[requestId]], kwargs: reason ? { reason } : {} },
-      { model: 'approval.request', method: 'action_cancel', args: [[requestId]], kwargs: reason ? { reason } : {} },
+      { model: 'approval.request', method: 'action_cancel', args: [[requestId]] },
     ]);
 
     if (reason?.trim()) {
       await this.commentApprovalRequest(requestId, `Lý do từ chối: ${reason.trim()}`);
     }
+    this.invalidateApprovalCache();
   }
 
   async commentApprovalRequest(requestId: number, content: string): Promise<void> {
@@ -341,10 +447,390 @@ class OdooService {
         }
       }
     ]);
+    this.invalidateApprovalCache();
+  }
+
+  async getApprovalRequestCounts(): Promise<ApprovalRequestCounts> {
+    const cacheKey = 'approval:counts';
+    const cached = this.getCachedValue<ApprovalRequestCounts>(cacheKey);
+    if (cached) return cached;
+
+    const pendingStates = ['pending', 'to_approve', 'new', 'confirm', 'waiting'];
+    const approvedStates = ['approved', 'approve', 'done'];
+    const rejectedStates = ['refused', 'rejected', 'reject', 'cancel', 'cancelled'];
+
+    const [all, pending, approved, rejected] = await Promise.all([
+      this.callKw<number>({
+        jsonrpc: '2.0',
+        id: 201,
+        method: 'call',
+        params: {
+          model: 'approval.request',
+          method: 'search_count',
+          args: [[]],
+          kwargs: {}
+        }
+      }),
+      this.callKw<number>({
+        jsonrpc: '2.0',
+        id: 202,
+        method: 'call',
+        params: {
+          model: 'approval.request',
+          method: 'search_count',
+          args: [[['request_status', 'in', pendingStates]]],
+          kwargs: {}
+        }
+      }),
+      this.callKw<number>({
+        jsonrpc: '2.0',
+        id: 203,
+        method: 'call',
+        params: {
+          model: 'approval.request',
+          method: 'search_count',
+          args: [[['request_status', 'in', approvedStates]]],
+          kwargs: {}
+        }
+      }),
+      this.callKw<number>({
+        jsonrpc: '2.0',
+        id: 204,
+        method: 'call',
+        params: {
+          model: 'approval.request',
+          method: 'search_count',
+          args: [[['request_status', 'in', rejectedStates]]],
+          kwargs: {}
+        }
+      }),
+    ]);
+
+    const output = {
+      all: all || 0,
+      pending: pending || 0,
+      approved: approved || 0,
+      rejected: rejected || 0,
+    };
+    this.setCachedValue(cacheKey, output, 30 * 1000);
+    return output;
+  }
+
+  async getUserPendingApprovalCount(): Promise<number> {
+    const currentUser = this.getCurrentUser();
+    if (!currentUser?.uid) return 0;
+
+    const cacheKey = `approval:user:${currentUser.uid}:pending-count`;
+    const cached = this.getCachedValue<number>(cacheKey);
+    if (typeof cached === 'number') return cached;
+
+    const pendingStates = ['pending', 'new', 'waiting', 'confirm'];
+    const approvers = await this.callKw<any[]>({
+      jsonrpc: '2.0',
+      id: 205,
+      method: 'call',
+      params: {
+        model: 'approval.approver',
+        method: 'search_read',
+        args: [[
+          ['user_id', '=', currentUser.uid],
+          ['status', 'in', pendingStates]
+        ]],
+        kwargs: {
+          fields: ['request_id'],
+          limit: 500
+        }
+      }
+    });
+
+    const requestIds = Array.from(new Set(
+      (approvers || [])
+        .map((item) => Array.isArray(item.request_id) ? item.request_id[0] : null)
+        .filter((id): id is number => typeof id === 'number')
+    ));
+
+    if (requestIds.length === 0) return 0;
+
+    const requests = await this.callKw<any[]>({
+      jsonrpc: '2.0',
+      id: 2051,
+      method: 'call',
+      params: {
+        model: 'approval.request',
+        method: 'search_read',
+        args: [[['id', 'in', requestIds]]],
+        kwargs: {
+          fields: ['id', 'request_status']
+        }
+      }
+    });
+
+    const count = (requests || []).filter((item) => this.mapApprovalStatus(item.request_status) === 'pending').length;
+    this.setCachedValue(cacheKey, count, 25 * 1000);
+    return count;
+  }
+
+  async getUserPendingApprovalRequests(limit: number = 5): Promise<ApprovalRequest[]> {
+    const currentUser = this.getCurrentUser();
+    if (!currentUser?.uid) return [];
+
+    const cacheKey = `approval:user:${currentUser.uid}:pending-requests:${limit}`;
+    const cached = this.getCachedValue<ApprovalRequest[]>(cacheKey);
+    if (cached) return cached;
+
+    const pendingStates = ['pending', 'new', 'waiting', 'confirm'];
+    const approvers = await this.callKw<any[]>({
+      jsonrpc: '2.0',
+      id: 206,
+      method: 'call',
+      params: {
+        model: 'approval.approver',
+        method: 'search_read',
+        args: [[
+          ['user_id', '=', currentUser.uid],
+          ['status', 'in', pendingStates]
+        ]],
+        kwargs: {
+          fields: ['id', 'request_id'],
+          limit: limit * 2,
+          order: 'id desc'
+        }
+      }
+    });
+
+    const requestIds = Array.from(new Set(
+      (approvers || [])
+        .map((item) => Array.isArray(item.request_id) ? item.request_id[0] : null)
+        .filter((id): id is number => typeof id === 'number')
+    ));
+
+    if (requestIds.length === 0) return [];
+
+    const requests = await this.callKw<ApprovalRequest[]>({
+      jsonrpc: '2.0',
+      id: 207,
+      method: 'call',
+      params: {
+        model: 'approval.request',
+        method: 'search_read',
+        args: [[['id', 'in', requestIds]]],
+        kwargs: {
+          fields: [
+            'id',
+            'name',
+            'code',
+            'request_status',
+            'user_status',
+            'current_approval_sequence',
+            'next_approver_ids',
+            'approver_ids',
+            'request_owner_id',
+            'category_id',
+            'company_id',
+            'create_date',
+            'date_confirmed',
+            'date_scheduled',
+            'date_done',
+            'amount',
+            'reason',
+            'suggest',
+            'legal_basis'
+          ],
+          limit,
+          order: 'create_date desc, id desc'
+        }
+      }
+    });
+
+    const output = requests || [];
+    this.setCachedValue(cacheKey, output, 25 * 1000);
+    return output;
+  }
+
+  async getUserApprovalRequestsByStatuses(statuses: string[], limit: number = 5): Promise<ApprovalRequest[]> {
+    const currentUser = this.getCurrentUser();
+    if (!currentUser?.uid) return [];
+
+    if (!statuses.length) return [];
+
+    const normalizedStatuses = [...statuses].map((item) => item.toLowerCase()).sort().join(',');
+    const cacheKey = `approval:user:${currentUser.uid}:status-requests:${normalizedStatuses}:${limit}`;
+    const cached = this.getCachedValue<ApprovalRequest[]>(cacheKey);
+    if (cached) return cached;
+
+    const approvers = await this.callKw<any[]>({
+      jsonrpc: '2.0',
+      id: 208,
+      method: 'call',
+      params: {
+        model: 'approval.approver',
+        method: 'search_read',
+        args: [[
+          ['user_id', '=', currentUser.uid],
+          ['status', 'in', statuses]
+        ]],
+        kwargs: {
+          fields: ['id', 'request_id'],
+          limit: limit * 3,
+          order: 'id desc'
+        }
+      }
+    });
+
+    const requestIds = Array.from(new Set(
+      (approvers || [])
+        .map((item) => Array.isArray(item.request_id) ? item.request_id[0] : null)
+        .filter((id): id is number => typeof id === 'number')
+    ));
+
+    if (requestIds.length === 0) return [];
+
+    const requests = await this.callKw<ApprovalRequest[]>({
+      jsonrpc: '2.0',
+      id: 209,
+      method: 'call',
+      params: {
+        model: 'approval.request',
+        method: 'search_read',
+        args: [[['id', 'in', requestIds]]],
+        kwargs: {
+          fields: [
+            'id',
+            'name',
+            'code',
+            'request_status',
+            'user_status',
+            'current_approval_sequence',
+            'next_approver_ids',
+            'approver_ids',
+            'request_owner_id',
+            'category_id',
+            'company_id',
+            'create_date',
+            'date_confirmed',
+            'date_scheduled',
+            'date_done',
+            'amount',
+            'reason',
+            'suggest',
+            'legal_basis'
+          ],
+          limit,
+          order: 'create_date desc, id desc'
+        }
+      }
+    });
+
+    const output = requests || [];
+    this.setCachedValue(cacheKey, output, 25 * 1000);
+    return output;
+  }
+
+  async getPendingApprovalRequests(limit: number = 5): Promise<ApprovalRequest[]> {
+    const cacheKey = `approval:pending-requests:${limit}`;
+    const cached = this.getCachedValue<ApprovalRequest[]>(cacheKey);
+    if (cached) return cached;
+
+    const pendingStates = ['pending', 'to_approve', 'new', 'confirm', 'waiting'];
+    const result = await this.callKw<ApprovalRequest[]>({
+      jsonrpc: '2.0',
+      id: 210,
+      method: 'call',
+      params: {
+        model: 'approval.request',
+        method: 'search_read',
+        args: [[['request_status', 'in', pendingStates]]],
+        kwargs: {
+          fields: [
+            'id',
+            'name',
+            'code',
+            'request_status',
+            'user_status',
+            'current_approval_sequence',
+            'next_approver_ids',
+            'approver_ids',
+            'request_owner_id',
+            'category_id',
+            'company_id',
+            'create_date',
+            'date_confirmed',
+            'date_scheduled',
+            'date_done',
+            'amount',
+            'reason',
+            'suggest',
+            'legal_basis'
+          ],
+          limit,
+          order: 'create_date desc, id desc'
+        }
+      }
+    });
+
+    const output = result || [];
+    this.setCachedValue(cacheKey, output, 30 * 1000);
+    return output;
+  }
+
+  async getRecentDocuments(limit: number = 5): Promise<RecentDocument[]> {
+    const currentUser = this.getCurrentUser();
+    const domain = currentUser?.uid ? [['create_uid', '=', currentUser.uid]] : [];
+    const result = await this.callKw<any[]>({
+      jsonrpc: '2.0',
+      id: 220,
+      method: 'call',
+      params: {
+        model: 'ir.attachment',
+        method: 'search_read',
+        args: [domain],
+        kwargs: {
+          fields: ['id', 'name', 'mimetype', 'file_size', 'create_date'],
+          limit,
+          order: 'create_date desc, id desc'
+        }
+      }
+    });
+
+    return (result || []).map((item) => ({
+      id: item.id,
+      name: item.name || `File #${item.id}`,
+      mimetype: item.mimetype,
+      file_size: item.file_size,
+      create_date: item.create_date,
+      download_url: `/api/odoo/web/content/${item.id}?download=true`,
+    }));
+  }
+
+  async getUserSummaries(ids: number[]): Promise<Array<{ id: number; name: string }>> {
+    const uniqueIds = Array.from(new Set(ids.filter((id) => typeof id === 'number')));
+    if (uniqueIds.length === 0) return [];
+
+    const users = await this.callKw<any[]>({
+      jsonrpc: '2.0',
+      id: 61,
+      method: 'call',
+      params: {
+        model: 'res.users',
+        method: 'search_read',
+        args: [[['id', 'in', uniqueIds]]],
+        kwargs: {
+          fields: ['id', 'name']
+        }
+      }
+    });
+
+    return (users || [])
+      .filter((user) => typeof user.id === 'number')
+      .map((user) => ({ id: user.id, name: user.name || `User ${user.id}` }));
   }
 
   async getApprovalRequestFields(): Promise<Record<string, OdooFieldDefinition>> {
-    return this.callKw<Record<string, OdooFieldDefinition>>({
+    const cacheKey = 'approval:fields';
+    const cached = this.getCachedValue<Record<string, OdooFieldDefinition>>(cacheKey);
+    if (cached) return cached;
+
+    const output = await this.callKw<Record<string, OdooFieldDefinition>>({
       jsonrpc: '2.0',
       id: 30,
       method: 'call',
@@ -357,6 +843,8 @@ class OdooService {
         }
       }
     });
+    this.setCachedValue(cacheKey, output, 60 * 60 * 1000);
+    return output;
   }
 
   private async getApprovalApproversByIds(approverIds: number[]): Promise<ApprovalApprover[]> {
@@ -513,7 +1001,7 @@ class OdooService {
           ['res_id', '=', requestId],
         ]],
         kwargs: {
-          fields: ['id', 'author_id', 'body', 'date', 'create_date', 'attachment_ids', 'message_type', 'subtype_id'],
+          fields: ['id', 'author_id', 'body', 'date', 'create_date', 'attachment_ids', 'message_type', 'subtype_id', 'parent_id'],
           order: 'date desc, id desc',
           limit: 100,
         }
@@ -538,6 +1026,7 @@ class OdooService {
           body: item.body || '',
           date: item.date || item.create_date,
           attachment_ids: Array.isArray(item.attachment_ids) ? item.attachment_ids : [],
+          parent_id: Array.isArray(item.parent_id) ? item.parent_id[0] : null,
           subtype: subtypeLabel,
           kind,
         };
@@ -547,7 +1036,8 @@ class OdooService {
         const subtypeLower = String(item.subtype || '').toLowerCase();
         const isAutoNote = item.kind === 'note' && /auto|automation|odoobot|system|changelog/i.test(subtypeLower);
         return !isAutoNote;
-      });
+      })
+      .filter((item) => item.kind === 'comment');
 
     const messageAttachmentIds = comments.flatMap((item) => item.attachment_ids || []);
     const mergedAttachmentIds = Array.from(new Set([...(directAttachmentIds || []), ...messageAttachmentIds]));
@@ -599,6 +1089,10 @@ class OdooService {
   }
 
   async getApprovalRequestRelated(requestId: number): Promise<Pick<ApprovalRequestDetail, 'approvers' | 'followers' | 'comments' | 'attachments'>> {
+    const cacheKey = `approval:related:${requestId}`;
+    const cached = this.getCachedValue<Pick<ApprovalRequestDetail, 'approvers' | 'followers' | 'comments' | 'attachments'>>(cacheKey);
+    if (cached) return cached;
+
     const requestRows = await this.callKw<any[]>({
       jsonrpc: '2.0',
       id: 301,
@@ -623,15 +1117,31 @@ class OdooService {
     const directAttachmentIds: number[] = Array.isArray(row.attachment_ids) ? row.attachment_ids : [];
 
     try {
-      return await this.loadApprovalRequestRelatedByIds(requestId, approverIds, followerIds, directAttachmentIds);
+      const output = await this.loadApprovalRequestRelatedByIds(requestId, approverIds, followerIds, directAttachmentIds);
+      this.setCachedValue(cacheKey, output, 20 * 1000);
+      return output;
     } catch (error) {
       console.warn('Không tải được dữ liệu liên quan tờ trình:', error);
       return { approvers: [], followers: [], comments: [], attachments: [] };
     }
   }
 
+  async getApprovalRequestComments(requestId: number): Promise<ApprovalComment[]> {
+    try {
+      const data = await this.getApprovalCommentsAndAttachments(requestId, []);
+      return data.comments || [];
+    } catch (error) {
+      console.warn('Không tải được bình luận:', error);
+      return [];
+    }
+  }
+
   async getApprovalRequestDetail(requestId: number, options?: { includeRelated?: boolean }): Promise<ApprovalRequestDetail> {
     const includeRelated = options?.includeRelated !== false;
+    const cacheKey = `approval:detail:${requestId}:related:${includeRelated ? '1' : '0'}`;
+    const cached = this.getCachedValue<ApprovalRequestDetail>(cacheKey);
+    if (cached) return cached;
+
     const fieldDefinitions = await this.getApprovalRequestFields();
     const availableFields = new Set(Object.keys(fieldDefinitions || {}));
 
@@ -757,7 +1267,7 @@ class OdooService {
         type: fieldDefinitions[field]?.type,
       }));
 
-    return {
+    const output = {
       ...request,
       id: request.id || requestId,
       name: request.name || 'N/A',
@@ -786,6 +1296,8 @@ class OdooService {
       fieldDefinitions,
       extraFields,
     };
+    this.setCachedValue(cacheKey, output, includeRelated ? 20 * 1000 : 45 * 1000);
+    return output;
   }
 
   getCurrentUser(): OdooUser | null {
@@ -814,8 +1326,10 @@ class OdooService {
 
   async logout() {
     this.sessionId = null;
+    this.cacheStore.clear();
     localStorage.removeItem('odoo_session_id');
     localStorage.removeItem('odoo_user');
+    localStorage.removeItem('odoo_session_expires_at');
   }
 }
 

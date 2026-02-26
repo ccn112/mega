@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useMemo, useState, useEffect, useCallback, useRef } from 'react';
 import { 
   FileText, 
   Search, 
@@ -20,6 +20,7 @@ import {
 import { motion, AnimatePresence } from 'motion/react';
 import { odoo, ApprovalRequest } from '../services/odooService';
 import { ProposalDetail } from './ProposalDetail';
+import { ApprovalFilterModal, ApprovalFilterState } from '../components/ApprovalFilterModal';
 
 type StatusTab = 'all' | 'pending' | 'approved' | 'rejected';
 
@@ -35,6 +36,16 @@ export const ApprovalListScreen = ({ onBack }: { onBack: () => void }) => {
   const [hasMore, setHasMore] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [processingId, setProcessingId] = useState<number | null>(null);
+  const [activeAvatarId, setActiveAvatarId] = useState<number | null>(null);
+  const [counts, setCounts] = useState({ all: 0, pending: 0, approved: 0, rejected: 0 });
+  const [showAdvancedFilter, setShowAdvancedFilter] = useState(false);
+  const [advancedFilter, setAdvancedFilter] = useState<ApprovalFilterState>({
+    type: null,
+    company: null,
+    category: null,
+    requester: null,
+    statuses: [],
+  });
   const sentinelRef = useRef<HTMLDivElement | null>(null);
 
   const fetchRequests = useCallback(async (isRefresh = false, customOffset?: number) => {
@@ -74,9 +85,22 @@ export const ApprovalListScreen = ({ onBack }: { onBack: () => void }) => {
     }
   }, [limit, offset]);
 
+  const fetchCounts = useCallback(async () => {
+    try {
+      const [data, userPending] = await Promise.all([
+        odoo.getApprovalRequestCounts(),
+        odoo.getUserPendingApprovalCount(),
+      ]);
+      setCounts({ ...data, pending: userPending });
+    } catch (error) {
+      console.warn('Không tải được thống kê tờ trình:', error);
+    }
+  }, []);
+
   useEffect(() => {
     setLoading(true);
     fetchRequests(true);
+    fetchCounts();
   }, []);
 
   useEffect(() => {
@@ -175,6 +199,45 @@ export const ApprovalListScreen = ({ onBack }: { onBack: () => void }) => {
     return `${pad(date.getHours())}:${pad(date.getMinutes())} ${pad(date.getDate())}-${pad(date.getMonth() + 1)}-${date.getFullYear()}`;
   };
 
+  const typeOptions = useMemo(() => {
+    const set = new Map<string, string>();
+    requests.forEach((req) => {
+      const value = (req.code || '').split('-')[0];
+      if (value) set.set(value, value);
+    });
+    return Array.from(set.entries()).map(([value, label]) => ({ value, label }));
+  }, [requests]);
+
+  const companyOptions = useMemo(() => {
+    const set = new Map<string, string>();
+    requests.forEach((req) => {
+      if (Array.isArray(req.company_id) && req.company_id[1]) {
+        set.set(String(req.company_id[0]), req.company_id[1]);
+      }
+    });
+    return Array.from(set.entries()).map(([value, label]) => ({ value, label }));
+  }, [requests]);
+
+  const categoryOptions = useMemo(() => {
+    const set = new Map<string, string>();
+    requests.forEach((req) => {
+      if (Array.isArray(req.category_id) && req.category_id[1]) {
+        set.set(String(req.category_id[0]), req.category_id[1]);
+      }
+    });
+    return Array.from(set.entries()).map(([value, label]) => ({ value, label }));
+  }, [requests]);
+
+  const requesterOptions = useMemo(() => {
+    const set = new Map<string, string>();
+    requests.forEach((req) => {
+      if (Array.isArray(req.request_owner_id) && req.request_owner_id[1]) {
+        set.set(String(req.request_owner_id[0]), req.request_owner_id[1]);
+      }
+    });
+    return Array.from(set.entries()).map(([value, label]) => ({ value, label }));
+  }, [requests]);
+
   const filteredRequests = requests.filter(req => {
     const status = odoo.mapApprovalStatus(req.request_status);
     const matchesStatus = statusTab === 'all' || status === statusTab;
@@ -183,7 +246,13 @@ export const ApprovalListScreen = ({ onBack }: { onBack: () => void }) => {
       (req.code || '').toLowerCase().includes(query) ||
       (req.reason || '').toLowerCase().includes(query);
 
-    return matchesStatus && matchesSearch;
+    const matchesType = !advancedFilter.type || (req.code || '').startsWith(advancedFilter.type);
+    const matchesCompany = !advancedFilter.company || String(req.company_id?.[0] || '') === advancedFilter.company;
+    const matchesCategory = !advancedFilter.category || String(req.category_id?.[0] || '') === advancedFilter.category;
+    const matchesRequester = !advancedFilter.requester || String(req.request_owner_id?.[0] || '') === advancedFilter.requester;
+    const matchesAdvancedStatus = advancedFilter.statuses.length === 0 || advancedFilter.statuses.includes(status);
+
+    return matchesStatus && matchesSearch && matchesType && matchesCompany && matchesCategory && matchesRequester && matchesAdvancedStatus;
   });
 
   const sortedRequests = [...filteredRequests].sort((a, b) => {
@@ -193,17 +262,28 @@ export const ApprovalListScreen = ({ onBack }: { onBack: () => void }) => {
     return (b.id || 0) - (a.id || 0);
   });
 
-  const tabCounts = requests.reduce(
-    (acc, req) => {
-      const status = odoo.mapApprovalStatus(req.request_status);
-      acc.all += 1;
-      if (status === 'pending') acc.pending += 1;
-      if (status === 'approved') acc.approved += 1;
-      if (status === 'rejected') acc.rejected += 1;
-      return acc;
-    },
-    { all: 0, pending: 0, approved: 0, rejected: 0 }
-  );
+  const sortedApproverIds = (req: ApprovalRequest) => {
+    const ids = Array.isArray(req.approver_ids) ? req.approver_ids : [];
+    if (ids.length === 0) return req.next_approver_ids || [];
+    return ids;
+  };
+
+  const tabCounts = counts;
+
+  const isUserPending = (req: ApprovalRequest) => {
+    const userStatus = odoo.mapApprovalStatus(req.user_status || req.request_status || '');
+    return userStatus === 'pending';
+  };
+
+  const getRequesterAvatar = (req: ApprovalRequest) => {
+    const requesterId = Array.isArray(req.request_owner_id) ? req.request_owner_id[0] : null;
+    if (!requesterId) return null;
+    return {
+      id: requesterId,
+      name: req.request_owner_id?.[1] || 'N/A',
+      url: `/api/odoo/web/image?model=res.users&id=${requesterId}&field=avatar_128`,
+    };
+  };
 
   return (
     <motion.div 
@@ -218,10 +298,13 @@ export const ApprovalListScreen = ({ onBack }: { onBack: () => void }) => {
           <button onClick={onBack} className="p-2 hover:bg-slate-100 rounded-full transition-colors">
             <ArrowLeft size={20} className="text-slate-600" />
           </button>
-          <h1 className="font-black text-brand-blue uppercase tracking-tight">Danh sách tờ trình</h1>
+          <h1 className="font-black text-brand-blue uppercase tracking-tight leading-tight whitespace-normal">Danh sách tờ trình</h1>
         </div>
         <button 
-          onClick={() => fetchRequests(true)}
+          onClick={() => {
+            fetchRequests(true);
+            fetchCounts();
+          }}
           className={`p-2 hover:bg-slate-100 rounded-full transition-colors ${refreshing ? 'animate-spin' : ''}`}
         >
           <RefreshCw size={20} className="text-slate-600" />
@@ -230,15 +313,23 @@ export const ApprovalListScreen = ({ onBack }: { onBack: () => void }) => {
 
       {/* Search & Filter */}
       <div className="p-4 bg-white border-b border-slate-200 space-y-3">
-        <div className="relative">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
-          <input 
-            type="text" 
-            placeholder="Tìm kiếm tờ trình, mã, lý do..."
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            className="w-full bg-slate-100 border-none rounded-xl py-3 pl-10 pr-4 text-sm focus:ring-2 focus:ring-brand-blue/20 outline-none transition-all"
-          />
+        <div className="flex gap-2">
+          <div className="relative flex-1">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
+            <input 
+              type="text" 
+              placeholder="Tìm kiếm tờ trình, mã, lý do..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="w-full bg-slate-100 border-none rounded-xl py-3 pl-10 pr-4 text-sm focus:ring-2 focus:ring-brand-blue/20 outline-none transition-all"
+            />
+          </div>
+          <button
+            onClick={() => setShowAdvancedFilter(true)}
+            className="p-3 bg-white border border-slate-200 rounded-xl text-slate-600 hover:border-brand-blue/30 hover:text-brand-blue transition-all"
+          >
+            <Filter size={18} />
+          </button>
         </div>
         <div className="flex gap-2 overflow-x-auto pb-1 no-scrollbar">
           {[
@@ -298,7 +389,7 @@ export const ApprovalListScreen = ({ onBack }: { onBack: () => void }) => {
                         {getStatusLabel(req.request_status)}
                       </div>
                     </div>
-                    <h3 className="text-sm font-bold text-slate-800 line-clamp-1 group-hover:text-brand-blue transition-colors">
+                    <h3 className="text-sm font-bold text-slate-800 line-clamp-2 group-hover:text-brand-blue transition-colors">
                       {req.name}
                     </h3>
                   </div>
@@ -307,9 +398,31 @@ export const ApprovalListScreen = ({ onBack }: { onBack: () => void }) => {
 
                 <div className="grid grid-cols-2 gap-4 mb-4">
                   <div className="flex items-center gap-2">
-                    <div className="size-7 rounded-lg bg-slate-50 flex items-center justify-center text-slate-400">
-                      <User size={14} />
-                    </div>
+                    {getRequesterAvatar(req) ? (
+                      <div className="relative">
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setActiveAvatarId(activeAvatarId === getRequesterAvatar(req)!.id ? null : getRequesterAvatar(req)!.id);
+                          }}
+                          title={getRequesterAvatar(req)!.name}
+                          className={`size-7 rounded-full border-2 border-white bg-slate-200 overflow-hidden transition-transform ${
+                            activeAvatarId === getRequesterAvatar(req)!.id ? 'scale-110' : ''
+                          }`}
+                        >
+                          <img src={getRequesterAvatar(req)!.url} alt="requester" className="w-full h-full object-cover" />
+                        </button>
+                        {activeAvatarId === getRequesterAvatar(req)!.id && (
+                          <div className="absolute -top-7 left-1/2 -translate-x-1/2 whitespace-nowrap text-[10px] font-bold text-white bg-slate-800 px-2 py-0.5 rounded">
+                            {getRequesterAvatar(req)!.name}
+                          </div>
+                        )}
+                      </div>
+                    ) : (
+                      <div className="size-7 rounded-lg bg-slate-50 flex items-center justify-center text-slate-400">
+                        <User size={14} />
+                      </div>
+                    )}
                     <div>
                       <p className="text-[8px] font-bold text-slate-400 uppercase tracking-wider">Người yêu cầu</p>
                       <p className="text-[11px] font-bold text-slate-700">{req.request_owner_id?.[1] || 'N/A'}</p>
@@ -332,20 +445,36 @@ export const ApprovalListScreen = ({ onBack }: { onBack: () => void }) => {
                     <span className="text-[10px] font-medium">{formatDateTime(req.create_date || req.date_confirmed)}</span>
                   </div>
                   <div className="flex -space-x-2">
-                    {(req.next_approver_ids || []).slice(0, 3).map((userId) => (
-                      <div key={userId} className="size-6 rounded-full border-2 border-white bg-slate-200 overflow-hidden">
-                        <img src={`/api/odoo/web/image?model=res.users&id=${userId}&field=avatar_128`} alt="approver" className="w-full h-full object-cover" />
+                    {sortedApproverIds(req).slice(0, 3).map((userId) => (
+                      <div key={userId} className="relative">
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setActiveAvatarId(activeAvatarId === userId ? null : userId);
+                          }}
+                          title={`User ${userId}`}
+                          className={`size-6 rounded-full border-2 border-white bg-slate-200 overflow-hidden transition-transform ${
+                            activeAvatarId === userId ? 'scale-110' : ''
+                          }`}
+                        >
+                          <img src={`/api/odoo/web/image?model=res.users&id=${userId}&field=avatar_128`} alt="approver" className="w-full h-full object-cover" />
+                        </button>
+                        {activeAvatarId === userId && (
+                          <div className="absolute -top-7 left-1/2 -translate-x-1/2 whitespace-nowrap text-[10px] font-bold text-white bg-slate-800 px-2 py-0.5 rounded">
+                            ID {userId}
+                          </div>
+                        )}
                       </div>
                     ))}
-                    {(req.next_approver_ids || []).length > 3 && (
+                    {sortedApproverIds(req).length > 3 && (
                       <div className="size-6 rounded-full border-2 border-white bg-brand-blue flex items-center justify-center text-[8px] font-bold text-white">
-                        +{(req.next_approver_ids || []).length - 3}
+                        +{sortedApproverIds(req).length - 3}
                       </div>
                     )}
                   </div>
                 </div>
 
-                {odoo.mapApprovalStatus(req.request_status) === 'pending' && (
+                {isUserPending(req) ? (
                   <div className="mt-3 pt-3 border-t border-slate-100 grid grid-cols-3 gap-2">
                     <button
                       onClick={(e) => {
@@ -381,6 +510,20 @@ export const ApprovalListScreen = ({ onBack }: { onBack: () => void }) => {
                       Bình luận
                     </button>
                   </div>
+                ) : (
+                  <div className="mt-3 pt-3 border-t border-slate-100">
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleComment(req.id);
+                      }}
+                      disabled={processingId === req.id}
+                      className="w-full py-2 rounded-lg text-[10px] font-bold text-slate-600 bg-slate-100 flex items-center justify-center gap-1 disabled:opacity-50"
+                    >
+                      <MessageSquare size={12} />
+                      Bình luận
+                    </button>
+                  </div>
                 )}
               </motion.div>
             ))}
@@ -409,6 +552,18 @@ export const ApprovalListScreen = ({ onBack }: { onBack: () => void }) => {
           />
         )}
       </AnimatePresence>
+
+      <ApprovalFilterModal
+        isOpen={showAdvancedFilter}
+        onClose={() => setShowAdvancedFilter(false)}
+        onApply={setAdvancedFilter}
+        onReset={() => setAdvancedFilter({ type: null, company: null, category: null, requester: null, statuses: [] })}
+        state={advancedFilter}
+        typeOptions={typeOptions}
+        companyOptions={companyOptions}
+        categoryOptions={categoryOptions}
+        requesterOptions={requesterOptions}
+      />
     </motion.div>
   );
 };

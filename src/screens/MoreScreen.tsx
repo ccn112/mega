@@ -15,20 +15,28 @@ import {
   PieChart
 } from 'lucide-react';
 import { motion } from 'motion/react';
+import { odoo } from '../services/odooService';
 
 export const MoreScreen = ({ 
+  userRole,
   onShowAI, 
   onShowCRM, 
   onShowDashboard,
   onLogout,
   onSimulateNotification
 }: { 
+  userRole?: string | null,
   onShowAI: () => void, 
   onShowCRM: () => void, 
   onShowDashboard: () => void,
   onLogout: () => void,
   onSimulateNotification?: (type: 'project' | 'task' | 'proposal' | 'approval') => void
 }) => {
+  const user = odoo.getCurrentUser();
+  const displayName = user?.name || 'Người dùng';
+  const displayRole = userRole || 'Nhân sự';
+  const displayAvatar = user?.image_url || 'https://lh3.googleusercontent.com/aida-public/AB6AXuDyodQTBPDqKiieiG9uPNA_Vr1-wEx33DZp83o1Ac1OyJgt4VY1dOBDb3F1QBaByoLxMxV5rpEpMaybBIruU4Ekh4XwMi-E9aO7pdBlHAXJsfWSQClOodHv4zCMBsLLR3zigvSuCoPXQiQfuNZTgSt517fygttY0pXDJKKkb8XvkuA2vPlCYs5hk5ld7sNSi2CGWcxWb8_j54KFyymgeCjoW9hP9U67-HvibEyudoH72-wI6nP2VQ7myCpO68-G9-qzqb6WWDnu20Z0';
+
   const apps = [
     { label: 'AI Agent', icon: Bot, color: 'bg-indigo-50 text-indigo-600', action: onShowAI, desc: 'Trợ lý ảo thông minh' },
     { label: 'CRM', icon: Building2, color: 'bg-blue-50 text-blue-600', action: onShowCRM, desc: 'Quản trị khách hàng' },
@@ -47,13 +55,14 @@ export const MoreScreen = ({
         {/* User Profile Summary */}
         <div className="bg-white p-4 rounded-2xl border border-slate-100 shadow-sm flex items-center gap-4">
           <img 
-            src="https://lh3.googleusercontent.com/aida-public/AB6AXuDyodQTBPDqKiieiG9uPNA_Vr1-wEx33DZp83o1Ac1OyJgt4VY1dOBDb3F1QBaByoLxMxV5rpEpMaybBIruU4Ekh4XwMi-E9aO7pdBlHAXJsfWSQClOodHv4zCMBsLLR3zigvSuCoPXQiQfuNZTgSt517fygttY0pXDJKKkb8XvkuA2vPlCYs5hk5ld7sNSi2CGWcxWb8_j54KFyymgeCjoW9hP9U67-HvibEyudoH72-wI6nP2VQ7myCpO68-G9-qzqb6WWDnu20Z0" 
+            src={displayAvatar}
             className="size-14 rounded-full object-cover ring-4 ring-blue-50"
             alt="User"
+            referrerPolicy="no-referrer"
           />
           <div className="flex-1">
-            <h3 className="text-base font-black text-slate-900">Nguyễn Văn A</h3>
-            <p className="text-xs text-slate-500 font-medium">Tổng Giám Đốc • ID: TAD-001</p>
+            <h4 className="text-sm font-bold text-slate-900">{displayName}</h4>
+            <p className="text-xs text-slate-500 font-medium truncate">{displayRole}</p>
           </div>
           <button className="p-2 text-slate-300 hover:text-brand-blue transition-colors">
             <Settings size={20} />
@@ -61,7 +70,7 @@ export const MoreScreen = ({
         </div>
 
         {/* Simulation Section */}
-        {onSimulateNotification && (
+        {/* {onSimulateNotification && (
           <section>
             <h3 className="text-[10px] font-black text-slate-400 uppercase tracking-[0.2em] mb-4 px-1">Mô phỏng Push Notification</h3>
             <div className="grid grid-cols-2 gap-2">
@@ -91,7 +100,7 @@ export const MoreScreen = ({
               </button>
             </div>
           </section>
-        )}
+        )} */}
 
         {/* Apps Grid */}
         <section>
