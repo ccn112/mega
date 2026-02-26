@@ -1,0 +1,9 @@
+{
+  "name": "TAD Mega App",
+  "description": "Ứng dụng nội bộ tập đoàn Tân Á Đại Thành - Quản lý công việc, dự án và nhân sự.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone",
+    "geolocation"
+  ]
+}

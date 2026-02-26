@@ -1,0 +1,21 @@
+{
+  "name": "TAD Mega App",
+  "short_name": "TAD Mega",
+  "description": "Ứng dụng nội bộ tập đoàn Tân Á Đại Thành",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0054a6",
+  "theme_color": "#0054a6",
+  "icons": [
+    {
+      "src": "https://tanadaithanh.vn/wp-content/uploads/2024/10/cropped-icon-192x192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "https://tanadaithanh.vn/wp-content/uploads/2024/10/cropped-icon-192x192.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}
